@@ -1,0 +1,73 @@
+resource_types:
+  - name: gcs-resource
+    type: docker-image
+    source:
+      repository: frodenas/gcs-resource
+
+resources:
+- name: aistreamer-image
+  type: docker-image
+  source:
+    repository: gcr.io/iot-video-demo/aistreamser
+    tag: v1
+    username: _json_key
+    password: ((GCP_KEY))
+
+- name: results
+  type: gcs-resource
+  source:
+    bucket: ((GCS_BUCKET))
+    json_key: ((GCP_KEY))
+    versioned_file: results.txt
+
+jobs:
+- name: process-streaming-video
+  plan:
+  - aggregate:
+    - get: aistreamer-image
+  - task: process-streaming-video
+    image: aistreamer-image
+    config:
+      platform: linux
+      outputs:
+      - name: video-intelligence-results
+      params:
+        GCP_KEY: ((GCP_KEY))
+        CONFIG_FILE: ((CONFIG_FILE))
+        HLS_SOURCE: ((hls_source))
+      run:
+        path: bash
+        args:
+        - "-c"
+        - |
+          set -eux
+
+          echo "exporting pipeline"
+
+          #login to gclouod
+          echo $GCP_KEY > service.key
+
+          #set up pipeline location
+          export PIPE_NAME=video-feed-pipe
+          mkfifo $PIPE_NAME
+          echo $PIPE_NAME
+          echo $HLS_SOURCE
+
+          #Run AIStreamer ingestion proxy
+          export CONFIG=cpp/$CONFIG_FILE
+          echo export $CONFIG
+      
+          echo "export GCP Keys"
+          export GOOGLE_APPLICATION_CREDENTIALS=service.key
+
+          cp -R /google/cpp/ cpp/
+
+          #start streaming
+          gst-launch-1.0 -v souphttpsrc location=$HLS_SOURCE ! hlsdemux ! filesink location=$PIPE_NAME &
+
+          #start processing
+          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/output.txt
+
+  - put: results
+    params:
+      file: "video-intelligence-results/output.txt"
