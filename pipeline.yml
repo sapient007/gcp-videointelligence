@@ -18,7 +18,7 @@ resources:
   source:
     bucket: ((GCS_BUCKET))
     json_key: ((GCP_KEY))
-    versioned_file: results.txt
+    versioned_file: hls-output.txt
 
 - name: aistreamer
   type: git
@@ -69,14 +69,14 @@ jobs:
           cp -R /google/cpp/ cpp/
 
           #start streaming
-          gst-launch-1.0 -v souphttpsrc location=$HLS_SOURCE ! hlsdemux connection-speed=10 ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-hls-output.txt & 
+          gst-launch-1.0 -v souphttpsrc location=$HLS_SOURCE ! hlsdemux connection-speed=16 ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-hls-output.txt &
 
           #start processing
           ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/hls-output.txt
 
   - put: results
     params:
-      file: "video-intelligence-results/output.txt"
+      file: "video-intelligence-results/hls-output.txt"
 
 - name: streaming-video-RTSP-to-GCS
   plan:
@@ -130,16 +130,18 @@ jobs:
           cp -R /google/cpp/ cpp/
 
           #start streaming
-          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-output.txt & 
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output.txt & 
 
           #start processing
-          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-rtsp-output.txt & 
+          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output.txt & 
 
           #wait for pipe to setup 
-
-          while true; do
+          #currently stop at 20mins. 
+          COUNTER=0
+          while [  $COUNTER -lt 20 ]; do
             #sleep for 2mins
             sleep 2m
+            let COUNTER=COUNTER+2 
             gsutil rsync -C video-intelligence-results/ gs://$GCS_BUCKET/ || true
           done
       
