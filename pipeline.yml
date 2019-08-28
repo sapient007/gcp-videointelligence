@@ -140,6 +140,6 @@ jobs:
           while true; do
             #sleep for 2mins
             sleep 2m
-            gsutil rsync video-intelligence-results/ gs://$GCS_BUCKET/
+            gsutil rsync -C video-intelligence-results/ gs://$GCS_BUCKET/ || true
           done
       
