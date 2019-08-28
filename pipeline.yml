@@ -27,7 +27,7 @@ resources:
 
 
 jobs:
-- name: process-streaming-video
+- name: streaming-video-HLS-to-GCS
   plan:
   - aggregate:
     - get: aistreamer-image
@@ -69,7 +69,7 @@ jobs:
           cp -R /google/cpp/ cpp/
 
           #start streaming
-          gst-launch-1.0 -v souphttpsrc location=$HLS_SOURCE ! hlsdemux connection-speed=10 ! filesink location=$PIPE_NAME &
+          gst-launch-1.0 -v souphttpsrc location=$HLS_SOURCE ! hlsdemux connection-speed=10 ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-hls-output.txt & 
 
           #start processing
           ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/hls-output.txt
@@ -78,7 +78,7 @@ jobs:
     params:
       file: "video-intelligence-results/output.txt"
 
-- name: process-streaming-video-rtsp
+- name: streaming-video-RTSP-to-GCS
   plan:
   - aggregate:
     - get: aistreamer-image
@@ -133,7 +133,7 @@ jobs:
           gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-output.txt & 
 
           #start processing
-          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output.txt & 
+          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-rtsp-output.txt & 
 
           #wait for pipe to setup 
 
