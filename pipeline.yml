@@ -9,7 +9,7 @@ resources:
   type: docker-image
   source:
     repository: gcr.io/iot-video-demo/aistreamser
-    tag: v2
+    tag: v4
     username: _json_key
     password: ((GCP_KEY))
 
@@ -25,6 +25,10 @@ resources:
   source:
     uri: https://github.com/sapient007/aistreamer.git
 
+- name: video-intelligence-parser
+  type: git
+  source:
+    uri: https://github.com/sapient007/video-intelligence-parser.git
 
 jobs:
 - name: streaming-video-HLS-to-GCS
@@ -107,7 +111,9 @@ jobs:
           set -eux
 
           echo "exporting pipeline"
-
+          
+          # create date variable:
+          NOW=$(date +"%m_%d_%Y")
           #login to gclouod
           echo $GCP_KEY > service.key
 
@@ -130,10 +136,10 @@ jobs:
           cp -R /google/cpp/ cpp/
 
           #start streaming
-          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output.txt & 
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
 
           #start processing
-          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output.txt & 
+          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output-$NOW.txt & 
 
           #wait for pipe to setup 
           #currently stop at 20mins. 
@@ -144,4 +150,132 @@ jobs:
             let COUNTER=COUNTER+2 
             gsutil rsync -C video-intelligence-results/ gs://$GCS_BUCKET/ || true
           done
+
+- name: streaming-video-RTSP-Python
+  plan:
+  - aggregate:
+    - get: aistreamer-image
+    - get: aistreamer
+  - task: process-streaming-video-rtsp
+    image: aistreamer-image
+    config:
+      platform: linux
+      inputs:
+      - name: aistreamer
+      outputs:
+      - name: video-intelligence-results
+      params:
+        GCP_KEY: ((GCP_KEY))
+        GCS_BUCKET: ((GCS_BUCKET))
+        CONFIG_FILE: ((CONFIG_FILE))
+        RTSP_SOURCE: ((RTSP_SOURCE))
+        GCP_PROJECT: ((GCP_PROJECT))
+        RTSP_USER: ((video_user))
+        RTSP_USER_PASS: ((video_pass))
+      run:
+        path: bash
+        args:
+        - "-c"
+        - |
+          set -eux
+
+          echo "exporting pipeline"
+          
+          # create date variable:
+          NOW=$(date +"%m_%d_%Y")
+          #login to gclouod
+          echo $GCP_KEY > service.key
+
+          #log in to GCP
+          gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
+
+          #set up pipeline location
+          export PIPE_NAME=video-feed-pipe
+          mkfifo $PIPE_NAME
+          echo $PIPE_NAME
+          echo $RTSP_SOURCE
+
+          #Run AIStreamer ingestion proxy
+          export CONFIG=cpp/$CONFIG_FILE
+          echo export $CONFIG
       
+          echo "export GCP Keys"
+          export GOOGLE_APPLICATION_CREDENTIALS=service.key
+
+          cp -R /google/cpp/ cpp/
+
+          #start streaming
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
+
+          # start python program
+          python aistreamer/ingestion/client/python/streaming_object_tracking_camera.py $PIPE_NAME
+          
+- name: Continuous-Streaming-RTSP-Pub-Sub
+  plan:
+  - aggregate:
+    - get: aistreamer-image
+    - get: aistreamer
+    - get: video-intelligence-parser
+  - task: process-streaming-video-rtsp
+    image: aistreamer-image
+    config:
+      platform: linux
+      inputs:
+      - name: aistreamer
+      - name: video-intelligence-parser
+      outputs:
+      - name: video-intelligence-results
+      params:
+        GCP_KEY: ((GCP_KEY))
+        GCS_BUCKET: ((GCS_BUCKET))
+        CONFIG_FILE: ((CONFIG_FILE))
+        RTSP_SOURCE: ((RTSP_SOURCE))
+        GCP_PROJECT: ((GCP_PROJECT))
+        RTSP_USER: ((video_user))
+        RTSP_USER_PASS: ((video_pass))
+        PUB_SUB_TOPIC: ((PUB_SUB_TOPIC))
+      run:
+        path: bash
+        args:
+        - "-c"
+        - |
+          set -eux
+
+          echo "exporting pipeline"
+          
+          # create date variable:
+          NOW=$(date +"%m_%d_%Y")
+          #login to gclouod
+          echo $GCP_KEY > service.key
+
+          #log in to GCP
+          gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
+
+          #set up pipeline location
+          export PIPE_NAME=video-feed-pipe
+          mkfifo $PIPE_NAME
+          echo $PIPE_NAME
+          echo $RTSP_SOURCE
+
+          #Run AIStreamer ingestion proxy
+          export CONFIG=cpp/$CONFIG_FILE
+          echo export $CONFIG
+      
+          echo "export GCP Keys"
+          export GOOGLE_APPLICATION_CREDENTIALS=service.key
+
+          cp -R /google/cpp/ cpp/
+
+          #start streaming
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
+
+          #start processing
+          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output-$NOW.txt & 
+          
+          # allow for some time for the results to arrive
+          sleep 5
+          
+          #start python code to monitor output 
+          python video-intelligence-parser/video-intelligence-parser.py video-intelligence-results/rtsp-output-$NOW.txt
+
+
