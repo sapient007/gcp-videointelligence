@@ -9,7 +9,7 @@ resources:
   type: docker-image
   source:
     repository: gcr.io/iot-video-demo/aistreamser
-    tag: v4
+    tag: v7
     username: _json_key
     password: ((GCP_KEY))
 
@@ -246,6 +246,7 @@ jobs:
           
           # create date variable:
           NOW=$(date +"%m_%d_%Y")
+
           #login to gclouod
           echo $GCP_KEY > service.key
 
@@ -268,7 +269,12 @@ jobs:
           cp -R /google/cpp/ cpp/
 
           #start streaming
-          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME  &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
+          export DATE_TIME=$(date '+%d/%m/%Y %H:%M:%S')
+          echo "streaming time:" $DATE_TIME
+
+          #this sleep step is needed to ensure we have enough video buffer so that the streaming client does not reach end of file when uploading
+          sleep 15
 
           #start processing
           ./cpp/streaming_client_main --alsologtostderr -timeout $RUNTIME --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output-$NOW.txt & 
@@ -282,3 +288,4 @@ jobs:
           echo "going to run this job for " + $RUNTIME + " secs"
           
           sleep $RUNTIME
+          echo "done"
