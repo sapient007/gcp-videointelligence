@@ -9,7 +9,7 @@ resources:
   type: docker-image
   source:
     repository: gcr.io/iot-video-demo/aistreamser
-    tag: v7
+    tag: v8
     username: _json_key
     password: ((GCP_KEY))
 
