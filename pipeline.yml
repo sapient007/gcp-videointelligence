@@ -235,6 +235,8 @@ jobs:
         RTSP_USER_PASS: ((video_pass))
         PUB_SUB_TOPIC: ((PUB_SUB_TOPIC))
         RUNTIME: ((runtime))
+        DETECT_OBJ_NAME: ((DETECT_OBJ_NAME))
+        DETECT_OBJ_CONFIDENCE: ((DETECT_OBJ_CONFIDENCE))
       run:
         path: bash
         args:
