@@ -9,7 +9,7 @@ resources:
   type: docker-image
   source:
     repository: gcr.io/iot-video-demo/aistreamser
-    tag: v4
+    tag: v8
     username: _json_key
     password: ((GCP_KEY))
 
@@ -208,7 +208,7 @@ jobs:
           gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
 
           # start python program
-          python aistreamer/ingestion/client/python/streaming_object_tracking_camera.py $PIPE_NAME
+          python aistreamer/ingestion/client/python/streaming_continuous_object_tracking.py $PIPE_NAME
           
 - name: Continuous-Streaming-RTSP-Pub-Sub
   plan:
@@ -246,6 +246,7 @@ jobs:
           
           # create date variable:
           NOW=$(date +"%m_%d_%Y")
+
           #login to gclouod
           echo $GCP_KEY > service.key
 
@@ -268,7 +269,12 @@ jobs:
           cp -R /google/cpp/ cpp/
 
           #start streaming
-          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME  &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
+          export DATE_TIME=$(date '+%d/%m/%Y %H:%M:%S')
+          echo "streaming time:" $DATE_TIME
+
+          #this sleep step is needed to ensure we have enough video buffer so that the streaming client does not reach end of file when uploading
+          sleep 15
 
           #start processing
           ./cpp/streaming_client_main --alsologtostderr -timeout $RUNTIME --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output-$NOW.txt & 
@@ -282,3 +288,107 @@ jobs:
           echo "going to run this job for " + $RUNTIME + " secs"
           
           sleep $RUNTIME
+          echo "done"
+
+- name: Continuous-Streaming-RTSP-Splitmuxsink-Experimental
+  plan:
+  - aggregate:
+    - get: aistreamer-image
+    - get: aistreamer
+    - get: video-intelligence-parser
+  - task: clear-video-from-gcs
+    image: aistreamer-image
+    config:
+      platform: linux
+      params:
+        GCP_KEY: ((GCP_KEY))
+        GCS_BUCKET: ((GCS_BUCKET))
+        GCP_PROJECT: ((GCP_PROJECT))
+      run:
+        path: bash
+        args:
+        - "-c"
+        - |
+          set -eu
+
+          #login to gclouod
+          echo $GCP_KEY > service.key
+
+          #log in to GCP
+          gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
+
+          # clear the video file from previous run 
+          gsutil rm -f gs://$GCS_BUCKET/video/video-feed-pipe &> /dev/null || true
+
+  - task: process-streaming-rtsp-splitmuxsink
+    image: aistreamer-image
+    config:
+      platform: linux
+      inputs:
+      - name: aistreamer
+      - name: video-intelligence-parser
+      outputs:
+      - name: video-intelligence-results
+      - name: video-feed
+      params:
+        GCP_KEY: ((GCP_KEY))
+        GCS_BUCKET: ((GCS_BUCKET))
+        CONFIG_FILE: ((CONFIG_FILE))
+        RTSP_SOURCE: ((RTSP_SOURCE))
+        GCP_PROJECT: ((GCP_PROJECT))
+        RTSP_USER: ((video_user))
+        RTSP_USER_PASS: ((video_pass))
+        PUB_SUB_TOPIC: ((PUB_SUB_TOPIC))
+        RUNTIME: ((runtime))
+      run:
+        path: bash
+        args:
+        - "-c"
+        - |
+          set -eux
+
+          echo "exporting pipeline"
+          
+          # create date variable:
+          NOW=$(date +"%m_%d_%Y")
+          #login to gclouod
+          echo $GCP_KEY > service.key
+
+          #log in to GCP
+          gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
+
+          #set up pipeline location
+          mkdir videoconverter
+          export VIDEO_CONVERT_DIR=videoconverter
+          
+          echo $RTSP_SOURCE
+
+          #Run AIStreamer ingestion proxy
+          export CONFIG=cpp/$CONFIG_FILE
+          echo export $CONFIG
+      
+          echo "export GCP Keys"
+          export GOOGLE_APPLICATION_CREDENTIALS=service.key
+
+          cp -R /google/cpp/ cpp/
+
+          #start streaming
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" ! rtpjitterbuffer ! rtph264depay ! h264parse ! splitmuxsink location=video-feed/camerafeed_%02d max-size-time=60000000000 max-size-bytes=10000000 &> /dev/null &
+
+          # gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME  &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
+
+          # # start video-intelligence processing
+          # ./cpp/streaming_client_main --alsologtostderr -timeout $RUNTIME --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output-$NOW.txt &
+
+          # # start python code to monitor output 
+          # python video-intelligence-parser/video-intelligence-parser.py video-intelligence-results/rtsp-output-$NOW.txt &
+
+          # #wait for pipe to setup 
+          # #currently stop at 20mins. 
+          # COUNTER=0
+          # while [  $COUNTER -lt 100 ]; do
+          #   #sleep for 2mins
+          #   sleep 10
+          #   let COUNTER=COUNTER+1
+          #   gsutil rsync -C video gs://$GCS_BUCKET/video &> /dev/null || true
+          # done
