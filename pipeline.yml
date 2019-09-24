@@ -29,6 +29,7 @@ resources:
   type: git
   source:
     uri: https://github.com/sapient007/video-intelligence-parser.git
+    branch: wip-env-obj
 
 jobs:
 - name: streaming-video-HLS-to-GCS
@@ -242,7 +243,7 @@ jobs:
         args:
         - "-c"
         - |
-          set -eux
+          set -eu
 
           echo "exporting pipeline"
           
