@@ -1,3 +1,9 @@
+resource_types:
+  - name: gcs-resource
+    type: docker-image
+    source:
+      repository: frodenas/gcs-resource
+
 resources:
 - name: aistreamer-image
   type: docker-image
@@ -6,6 +12,11 @@ resources:
     tag: v8
     username: _json_key
     password: ((GCP_KEY))
+
+- name: rootfs
+  type: docker-image
+  source:
+    repository: pcfnorm/rootfs
 
 - name: aistreamer
   type: git
@@ -18,13 +29,18 @@ resources:
     uri: https://github.com/sapient007/video-intelligence-parser.git
     branch: wip-env-obj
 
+- name: streams
+  type: gcs-resource
+  source:
+    bucket: ((GCS_BUCKET))
+    json_key: ((GCP_KEY))
+    versioned_file: gist
+    
 jobs:
-- name: Continuous-Streaming-RTSP-Splitmuxsink-Experimental
+- name: clear-video-from-gcs
   plan:
   - aggregate:
     - get: aistreamer-image
-    - get: aistreamer
-    - get: video-intelligence-parser
   - task: clear-video-from-gcs
     image: aistreamer-image
     config:
@@ -47,17 +63,42 @@ jobs:
           gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
 
           # clear the video file from previous run 
-          gsutil rm -f gs://$GCS_BUCKET/video/video-feed-pipe &> /dev/null || true
+          gsutil -m rm -rf gs://$GCS_BUCKET/video-split
 
+- name: Start-Video_Feed
+  plan:
+  - aggregate:
+    - get: streams
+    - get: rootfs
+  - task: Start-Video_Feed
+    image: rootfs
+    config:
+      platform: linux
+      inputs:
+      - name: streams
+      run:
+        path: bash
+        args:
+        - "-c"
+        - |
+          set -eu
+          touch streams/gist
+  - put: streams
+    params:
+      file: "streams/gist"
+
+- name: RTSP-to-GCS
+  plan:
+  - aggregate:
+    - get: streams
+      passed: [Start-Video_Feed]
+      trigger: true
+    - get: aistreamer-image
   - task: process-streaming-rtsp-splitmuxsink
     image: aistreamer-image
     config:
       platform: linux
-      inputs:
-      - name: aistreamer
-      - name: video-intelligence-parser
       outputs:
-      - name: video-intelligence-results
       - name: video-feed
       params:
         GCP_KEY: ((GCP_KEY))
@@ -67,14 +108,13 @@ jobs:
         GCP_PROJECT: ((GCP_PROJECT))
         RTSP_USER: ((video_user))
         RTSP_USER_PASS: ((video_pass))
-        PUB_SUB_TOPIC: ((PUB_SUB_TOPIC))
         RUNTIME: ((runtime))
       run:
         path: bash
         args:
         - "-c"
         - |
-          set -eux
+          set -eu
 
           echo "exporting pipeline"
           
@@ -85,11 +125,98 @@ jobs:
 
           #log in to GCP
           gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
+                   
+          echo $RTSP_SOURCE
+
+          echo "export GCP Keys"
+          export GOOGLE_APPLICATION_CREDENTIALS=service.key
+
+          #start streaming
+          # gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" ! rtpjitterbuffer ! rtph264depay ! h264parse ! splitmuxsink location=video-feed/camera_feed_%04d.mov max-size-time=60000000000 max-size-bytes=10000000 &> /dev/null & 
+
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" ! rtpjitterbuffer ! rtph264depay ! h264parse ! splitmuxsink location=video-feed/camera_feed_%04d.mov max-size-time=60000000000 &> /dev/null & 
+
+          gst_pid=$(echo $!)
+          echo PID for streamer is $gst_pid
+
+          #wait for pipe to setup
+          sleep 30
+
+          #go to video-feeds dir
+          cd video-feed
+
+          SECONDS=0
+          while [ $SECONDS -le $RUNTIME ]; do
+              #find the oldest file, upload and then remove to free up space
+              count_file=$(ls -1 *.mov 2>/dev/null | wc -l)
+              if ((count_file>1)); then
+                  file_name=$(find *.mov -type f -printf '%p\n' | sort | head -n 1)
+                  echo $file_name
+                  gsutil -m cp -c $file_name gs://$GCS_BUCKET/video-split/$file_name
+                  rm -f $file_name
+              fi
+              sleep 5
+          done
+
+          # stop the streaming so files sizes won't change before last folder sync
+          kill -9 $gst_pid
+
+          #final sync of all the video files including the video file 
+          cd ..
+          gsutil -m rsync -C video-feed gs://$GCS_BUCKET/video-split  
+
+- name: RTSP-Video/Intelligence-Pub/Sub
+  plan:
+  - aggregate:
+    - get: streams
+      passed: [Start-Video_Feed]
+      trigger: true
+    - get: aistreamer-image
+    - get: aistreamer
+    - get: video-intelligence-parser
+  - task: process-streaming-video-rtsp
+    image: aistreamer-image
+    config:
+      platform: linux
+      inputs:
+      - name: aistreamer
+      - name: video-intelligence-parser
+      outputs:
+      - name: video-intelligence-results
+      params:
+        GCP_KEY: ((GCP_KEY))
+        GCS_BUCKET: ((GCS_BUCKET))
+        CONFIG_FILE: ((CONFIG_FILE))
+        RTSP_SOURCE: ((RTSP_SOURCE))
+        GCP_PROJECT: ((GCP_PROJECT))
+        RTSP_USER: ((video_user))
+        RTSP_USER_PASS: ((video_pass))
+        PUB_SUB_TOPIC: ((PUB_SUB_TOPIC))
+        RUNTIME: ((runtime))
+        DETECT_OBJ_NAME: ((DETECT_OBJ_NAME))
+        DETECT_OBJ_CONFIDENCE: ((DETECT_OBJ_CONFIDENCE))
+      run:
+        path: bash
+        args:
+        - "-c"
+        - |
+          set -eu
+
+          echo "exporting pipeline"
+          
+          # create date variable:
+          NOW=$(date +"%m_%d_%Y")
+
+          #login to gclouod
+          echo $GCP_KEY > service.key
+
+          #log in to GCP
+          gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
 
           #set up pipeline location
-          mkdir videoconverter
-          export VIDEO_CONVERT_DIR=videoconverter
-          
+          export PIPE_NAME=video-feed-pipe
+          mkfifo $PIPE_NAME
+          echo $PIPE_NAME
           echo $RTSP_SOURCE
 
           #Run AIStreamer ingestion proxy
@@ -103,19 +230,22 @@ jobs:
 
           #start streaming
           gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME  &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
-          
-          # start video-intelligence processing
-          ./cpp/streaming_client_main --alsologtostderr -timeout $RUNTIME --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output-$NOW.txt &
+          export DATE_TIME=$(date '+%d/%m/%Y %H:%M:%S')
+          echo "streaming time:" $DATE_TIME
 
-          # start python code to monitor output 
+          #this sleep step is needed to ensure we have enough video buffer so that the streaming client does not reach end of file when uploading
+          sleep 15
+
+          #start processing
+          ./cpp/streaming_client_main --alsologtostderr -timeout $RUNTIME --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output-$NOW.txt & 
+          
+          # allow for some time for the results to arrive
+          sleep 5
+
+          #start python code to monitor output 
           python video-intelligence-parser/video-intelligence-parser.py video-intelligence-results/rtsp-output-$NOW.txt &
 
-          #wait for pipe to setup 
-          #currently stop at 20mins. 
-          COUNTER=0
-          while [  $COUNTER -lt 100 ]; do
-            #sleep for 2mins
-            sleep 10
-            let COUNTER=COUNTER+1
-            gsutil rsync -C video gs://$GCS_BUCKET/video &> /dev/null || true
-          done
+          echo "going to run this job for " + $RUNTIME + " secs"
+          
+          sleep $RUNTIME
+          echo "done"
