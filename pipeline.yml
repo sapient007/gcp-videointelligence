@@ -13,13 +13,6 @@ resources:
     username: _json_key
     password: ((GCP_KEY))
 
-- name: results
-  type: gcs-resource
-  source:
-    bucket: ((GCS_BUCKET))
-    json_key: ((GCP_KEY))
-    versioned_file: hls-output.txt
-
 - name: aistreamer
   type: git
   source:
@@ -31,71 +24,82 @@ resources:
     uri: https://github.com/sapient007/video-intelligence-parser.git
     branch: wip-env-obj
 
+- name: streams
+  type: gcs-resource
+  source:
+    bucket: ((GCS_BUCKET))
+    json_key: ((GCP_KEY))
+    versioned_file: gist
+
+- name: rootfs
+  type: docker-image
+  source:
+    repository: pcfnorm/rootfs
+
 jobs:
-- name: streaming-video-HLS-to-GCS
+- name: clear-video-from-gcs
   plan:
   - aggregate:
     - get: aistreamer-image
-  - task: process-streaming-video
+  - task: clear-video-from-gcs
     image: aistreamer-image
     config:
       platform: linux
-      outputs:
-      - name: video-intelligence-results
       params:
         GCP_KEY: ((GCP_KEY))
-        CONFIG_FILE: ((CONFIG_FILE))
-        HLS_SOURCE: ((hls_source))
+        GCS_BUCKET: ((GCS_BUCKET))
+        GCP_PROJECT: ((GCP_PROJECT))
       run:
         path: bash
         args:
         - "-c"
         - |
-          set -eux
-
-          echo "exporting pipeline"
+          set -eu
 
           #login to gclouod
           echo $GCP_KEY > service.key
 
-          #set up pipeline location
-          export PIPE_NAME=video-feed-pipe
-          mkfifo $PIPE_NAME
-          echo $PIPE_NAME
-          echo $HLS_SOURCE
+          #log in to GCP
+          gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
 
-          #Run AIStreamer ingestion proxy
-          export CONFIG=cpp/$CONFIG_FILE
-          echo export $CONFIG
-      
-          echo "export GCP Keys"
-          export GOOGLE_APPLICATION_CREDENTIALS=service.key
+          # clear the video file from previous run 
+          gsutil -m rm -rf gs://$GCS_BUCKET/video-split
 
-          cp -R /google/cpp/ cpp/
-
-          #start streaming
-          gst-launch-1.0 -v souphttpsrc location=$HLS_SOURCE ! hlsdemux connection-speed=16 ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-hls-output.txt &
-
-          #start processing
-          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/hls-output.txt
-
-  - put: results
-    params:
-      file: "video-intelligence-results/hls-output.txt"
-
-- name: streaming-video-RTSP-to-GCS
+- name: Start-Video_Feed
   plan:
   - aggregate:
-    - get: aistreamer-image
-    - get: aistreamer
-  - task: process-streaming-video-rtsp
-    image: aistreamer-image
+    - get: streams
+    - get: rootfs
+  - task: Start-Video_Feed
+    image: rootfs
     config:
       platform: linux
       inputs:
-      - name: aistreamer
+      - name: streams
+      run:
+        path: bash
+        args:
+        - "-c"
+        - |
+          set -eu
+          touch streams/gist
+  - put: streams
+    params:
+      file: "streams/gist"
+
+- name: RTSP-to-GCS
+  plan:
+  - aggregate:
+    - get: streams
+      passed: [Start-Video_Feed]
+      trigger: true
+    - get: aistreamer-image
+  - task: process-streaming-rtsp-splitmuxsink
+    image: aistreamer-image
+    config:
+      platform: linux
       outputs:
-      - name: video-intelligence-results
+      - name: video-feed
       params:
         GCP_KEY: ((GCP_KEY))
         GCS_BUCKET: ((GCS_BUCKET))
@@ -104,12 +108,13 @@ jobs:
         GCP_PROJECT: ((GCP_PROJECT))
         RTSP_USER: ((video_user))
         RTSP_USER_PASS: ((video_pass))
+        RUNTIME: ((runtime))
       run:
         path: bash
         args:
         - "-c"
         - |
-          set -eux
+          set -eu
 
           echo "exporting pipeline"
           
@@ -120,100 +125,52 @@ jobs:
 
           #log in to GCP
           gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
-
-          #set up pipeline location
-          export PIPE_NAME=video-feed-pipe
-          mkfifo $PIPE_NAME
-          echo $PIPE_NAME
+                   
           echo $RTSP_SOURCE
 
-          #Run AIStreamer ingestion proxy
-          export CONFIG=cpp/$CONFIG_FILE
-          echo export $CONFIG
-      
           echo "export GCP Keys"
           export GOOGLE_APPLICATION_CREDENTIALS=service.key
 
-          cp -R /google/cpp/ cpp/
-
           #start streaming
-          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
+          # gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" ! rtpjitterbuffer ! rtph264depay ! h264parse ! splitmuxsink location=video-feed/camera_feed_%04d.mov max-size-time=60000000000 max-size-bytes=10000000 &> /dev/null & 
 
-          #start processing
-          ./cpp/streaming_client_main --alsologtostderr --endpoint "dns:///videointelligence.googleapis.com" --video_path=$PIPE_NAME --use_pipe=true --config=$CONFIG &> video-intelligence-results/rtsp-output-$NOW.txt & 
+          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" ! rtpjitterbuffer ! rtph264depay ! h264parse ! splitmuxsink location=video-feed/camera_feed_%04d.mov max-size-time=60000000000 &> /dev/null & 
 
-          #wait for pipe to setup 
-          #currently stop at 20mins. 
-          COUNTER=0
-          while [  $COUNTER -lt 20 ]; do
-            #sleep for 2mins
-            sleep 2m
-            let COUNTER=COUNTER+2 
-            gsutil rsync -C video-intelligence-results/ gs://$GCS_BUCKET/ || true
+          gst_pid=$(echo $!)
+          echo PID for streamer is $gst_pid
+
+          #wait for pipe to setup
+          sleep 30
+
+          #go to video-feeds dir
+          cd video-feed
+
+          SECONDS=0
+          while [ $SECONDS -le $RUNTIME ]; do
+              #find the oldest file, upload and then remove to free up space
+              count_file=$(ls -1 *.mov 2>/dev/null | wc -l)
+              if ((count_file>1)); then
+                  file_name=$(find *.mov -type f -printf '%p\n' | sort | head -n 1)
+                  echo $file_name
+                  gsutil -m cp -c $file_name gs://$GCS_BUCKET/video-split/$file_name
+                  rm -f $file_name
+              fi
+              sleep 5
           done
 
-- name: streaming-video-RTSP-Python
+          # stop the streaming so files sizes won't change before last folder sync
+          kill -9 $gst_pid &> /dev/null
+
+          #final sync of all the video files including the video file 
+          cd ..
+          gsutil -m rsync -C video-feed gs://$GCS_BUCKET/video-split  
+
+- name: RTSP-Video/Intelligence-Pub/Sub
   plan:
   - aggregate:
-    - get: aistreamer-image
-    - get: aistreamer
-  - task: process-streaming-video-rtsp
-    image: aistreamer-image
-    config:
-      platform: linux
-      inputs:
-      - name: aistreamer
-      outputs:
-      - name: video-intelligence-results
-      params:
-        GCP_KEY: ((GCP_KEY))
-        GCS_BUCKET: ((GCS_BUCKET))
-        CONFIG_FILE: ((CONFIG_FILE))
-        RTSP_SOURCE: ((RTSP_SOURCE))
-        GCP_PROJECT: ((GCP_PROJECT))
-        RTSP_USER: ((video_user))
-        RTSP_USER_PASS: ((video_pass))
-      run:
-        path: bash
-        args:
-        - "-c"
-        - |
-          set -eux
-
-          echo "exporting pipeline"
-          
-          # create date variable:
-          NOW=$(date +"%m_%d_%Y")
-          #login to gclouod
-          echo $GCP_KEY > service.key
-
-          #log in to GCP
-          gcloud auth activate-service-account --project=$GCP_PROJECT --key-file=service.key
-
-          #set up pipeline location
-          export PIPE_NAME=video-feed-pipe
-          mkfifo $PIPE_NAME
-          echo $PIPE_NAME
-          echo $RTSP_SOURCE
-
-          #Run AIStreamer ingestion proxy
-          export CONFIG=cpp/$CONFIG_FILE
-          echo export $CONFIG
-      
-          echo "export GCP Keys"
-          export GOOGLE_APPLICATION_CREDENTIALS=service.key
-
-          cp -R /google/cpp/ cpp/
-
-          #start streaming
-          gst-launch-1.0 -v rtspsrc location=$RTSP_SOURCE user-id=$RTSP_USER user-pw=$RTSP_USER_PASS protocols="tcp" tcp-timeout=0 latency=20000000 timeout=0 ! rtpjitterbuffer ! rtph264depay ! h264parse ! flvmux ! filesink location=$PIPE_NAME &> video-intelligence-results/gst-launch-rtsp-output-$NOW.txt & 
-
-          # start python program
-          python aistreamer/ingestion/client/python/streaming_object_tracking_camera.py $PIPE_NAME
-          
-- name: Continuous-Streaming-RTSP-Pub-Sub
-  plan:
-  - aggregate:
+    - get: streams
+      passed: [Start-Video_Feed]
+      trigger: true
     - get: aistreamer-image
     - get: aistreamer
     - get: video-intelligence-parser
