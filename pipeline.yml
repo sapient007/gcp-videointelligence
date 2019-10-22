@@ -4,7 +4,19 @@ resource_types:
     source:
       repository: frodenas/gcs-resource
 
+  - name: hangouts-resource
+    type: docker-image
+    source:
+      repository: cloudinn/concourse-hangouts-resource
+      tag: latest
+
 resources:
+- name: hangouts
+  type: hangouts-resource
+  source:
+    webhook_url: ((HANGOUT_HOOK))
+    post_url: true
+
 - name: aistreamer-image
   type: docker-image
   source:
@@ -86,6 +98,9 @@ jobs:
   - put: streams
     params:
       file: "streams/gist"
+  - put: hangouts
+    params:
+      message: "Starting a video feed"
 
 - name: RTSP-to-GCS
   plan:
@@ -165,7 +180,7 @@ jobs:
           cd ..
           gsutil -m rsync -C video-feed gs://$GCS_BUCKET/video-split  
 
-- name: RTSP-Video/Intelligence-Pub/Sub
+- name: RTSP-VideoIntelligence-PubSub
   plan:
   - aggregate:
     - get: streams
@@ -193,8 +208,8 @@ jobs:
         RTSP_USER_PASS: ((video_pass))
         PUB_SUB_TOPIC: ((PUB_SUB_TOPIC))
         RUNTIME: ((runtime))
-        DETECT_OBJ_NAME: ((DETECT_OBJ_NAME))
         DETECT_OBJ_CONFIDENCE: ((DETECT_OBJ_CONFIDENCE))
+        DETECTION_OBJS: ((DETECTION_OBJS))
       run:
         path: bash
         args:
